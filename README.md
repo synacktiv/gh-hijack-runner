@@ -34,7 +34,7 @@ If you manage to get a registration token to register a self-hosted runner for a
 $ gh-hijack-runner.py --registration-token AOTAA3QWE1A5QB6JFECOKQDGEVOVC --url https://github.com/syncicd/CICD --labels ubuntu-latest
 ```
 
-This can be an organization or repository registration toke.
+This can be an organization or repository registration token.
 
 ### From credentials of an existing GitHub runner
 
