@@ -34,6 +34,8 @@ If you manage to get a registration token to register a self-hosted runner for a
 $ gh-hijack-runner.py --registration-token AOTAA3QWE1A5QB6JFECOKQDGEVOVC --url https://github.com/syncicd/CICD --labels ubuntu-latest
 ```
 
+This can be an organization or repository registration toke.
+
 ### From credentials of an existing GitHub runner
 
 With arbitrary code execution on a self-hosted runner, you need to exfiltrate three files to assume the identity of the compromised runner:
