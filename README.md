@@ -2,11 +2,13 @@
 
 A python script to create a fake GitHub runner and hijack pipeline jobs to leak CI/CD secrets.
 
+Discover more details in the following blogpost: https://www.synacktiv.com/publications/hijacking-github-runners-to-compromise-a-github-organization
+
 ## Exploitation
 
-If you can obtain a registration token or achieve remote code execution on a self-hosted GitHub runner, you can either create or take over a GitHub runner. This will enable you to access all the secrets passed to that runner.
+If you can obtain a registration token or achieve remote code execution on a self-hosted GitHub runner, you can either create or take over a GitHub runner. This will allow you to access all the secrets passed to that runner.
 
-Using a registration token, you can register a runner labeled `ubuntu-latest`, gaining access to jobs originally intended for GitHub-provisioned runners. This allows you to compromise any workflow using this method.
+Using a registration token, you can register a runner labelled `ubuntu-latest`, gaining access to jobs originally intended for GitHub-provisioned runners. This allows you to compromise any workflow using this method.
 
 ```shell
 $ gh-hijack-runner.py --registration-token AOTAA3QWE1A5QB6JFECOKQDGEVOVC --url https://github.com/syncicd/CICD --labels ubuntu-latest
