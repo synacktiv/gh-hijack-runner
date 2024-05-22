@@ -2,7 +2,7 @@
 
 A python script to create a fake GitHub runner and hijack pipeline jobs to leak CI/CD secrets.
 
-Discover more details in the following blogpost: https://www.synacktiv.com/publications/hijacking-github-runners-to-compromise-a-github-organization
+Discover more details in the following blogpost: https://www.synacktiv.com/publications/hijacking-github-runners-to-compromise-the-organization 
 
 ## Exploitation
 
