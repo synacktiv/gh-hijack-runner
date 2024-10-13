@@ -282,8 +282,8 @@ class Hijack:
             "createdOn": "0001-01-01T00:00:00",
             "authorization": {
                 "publicKey": {
-                    "exponent": b64encode(long_to_bytes(self._rsaKey.e)),
-                    "modulus": b64encode(long_to_bytes(self._rsaKey.n))
+                    "exponent": b64encode(long_to_bytes(self._rsaKey.e)).decode('utf-8'),
+                    "modulus": b64encode(long_to_bytes(self._rsaKey.n)).decode('utf-8')
                 }
             },
             "id": 0,
