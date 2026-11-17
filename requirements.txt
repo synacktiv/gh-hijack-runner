@@ -1,4 +1,3 @@
 docopt
 pycryptodome
-PyJWT
 Requests

